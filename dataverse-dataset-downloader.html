@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QDR Dataverse Dataset Extractor</title>
+    <script src="https://webr.r-wasm.org/latest/webr.mjs" type="module"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .status-running { color: #0d6efd; }
+        .status-success { color: #198754; }
+        .status-error { color: #dc3545; }
+        .console-output {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.375rem;
+            padding: 1rem;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            max-height: 300px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .card-hover {
+            transition: transform 0.2s ease-in-out;
+        }
+        .card-hover:hover {
+            transform: translateY(-2px);
+        }
+        .loading-spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="gradient-bg py-4 mb-4">
+        <div class="container">
+            <h1 class="display-4 mb-2"><i class="fas fa-database"></i> QDR Dataverse Extractor</h1>
+            <p class="lead mb-0">Extract and download dataset metadata from the Qualitative Data Repository</p>
+        </div>
+    </div>
+
+    <div class="container mb-5">
+        <div class="row">
+            <div class="col-lg-4 mb-4">
+                <div class="card card-hover h-100 shadow-sm">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0"><i class="fas fa-cogs"></i> Extraction Settings</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="server-url" class="form-label">Dataverse Server</label>
+                            <input type="url" class="form-control" id="server-url" value="https://data.qdr.syr.edu">
+                            <div class="form-text">QDR server URL</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="start-date" class="form-label">Start Date (optional)</label>
+                            <input type="date" class="form-control" id="start-date">
+                            <div class="form-text">Filter datasets published after this date</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="end-date" class="form-label">End Date (optional)</label>
+                            <input type="date" class="form-control" id="end-date">
+                            <div class="form-text">Filter datasets published before this date</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="max-results" class="form-label">Max Results</label>
+                            <select class="form-select" id="max-results">
+                                <option value="100">100</option>
+                                <option value="500">500</option>
+                                <option value="1000" selected>1000</option>
+                                <option value="2000">2000</option>
+                            </select>
+                        </div>
+
+                        <button id="extract-btn" class="btn btn-success btn-lg w-100">
+                            <i class="fas fa-download"></i> Extract Datasets
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-8">
+                <div class="card card-hover h-100 shadow-sm">
+                    <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-terminal"></i> Status & Output</h5>
+                        <span id="status-badge" class="badge bg-secondary">Ready</span>
+                    </div>
+                    <div class="card-body">
+                        <div id="console-output" class="console-output mb-3">
+                            <div class="text-muted">
+                                <i class="fas fa-info-circle"></i> Ready to extract datasets from QDR Dataverse.
+                                <br><br>This tool will:
+                                <br>• Connect to the specified Dataverse server
+                                <br>• Extract dataset metadata (title, authors, keywords, etc.)
+                                <br>• Format author names for citations
+                                <br>• Convert keywords/subjects to semicolon-separated lists
+                                <br>• Apply optional date filtering
+                                <br>• Generate a downloadable CSV file
+                            </div>
+                        </div>
+                        
+                        <div id="download-section" class="d-none">
+                            <h6><i class="fas fa-file-csv"></i> Download Results</h6>
+                            <button id="download-btn" class="btn btn-primary">
+                                <i class="fas fa-download"></i> Download CSV
+                            </button>
+                            <div id="summary-stats" class="mt-3 p-3 bg-light rounded"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { WebR } from 'https://webr.r-wasm.org/latest/webr.mjs';
+
+        let webR;
+        let extractedData = null;
+
+        // Initialize WebR
+        async function initWebR() {
+            updateStatus('Initializing WebR...', 'running');
+            
+            webR = new WebR({
+                SW_URL: 'https://webr.r-wasm.org/latest/'
+            });
+            
+            await webR.init();
+            
+            // Install required packages
+            appendOutput('Installing required packages...\n');
+            await webR.installPackages(['dataverse', 'dplyr', 'purrr', 'lubridate']);
+            
+            // Load the R functions
+            await loadRFunctions();
+            
+            updateStatus('Ready', 'success');
+            appendOutput('WebR initialized successfully! Ready to extract datasets.\n\n');
+        }
+
+        async function loadRFunctions() {
+            appendOutput('Loading R functions...\n');
+            
+            // Load libraries first
+            await webR.evalR(`
+                library(dataverse)
+                library(dplyr)
+                library(purrr)
+                library(lubridate)
+            `);
+            
+            // Load helper functions
+            await webR.evalR(`
+                format_authors <- function(authors_list) {
+                  if (is.null(authors_list) || length(authors_list) == 0) {
+                    return(NA_character_)
+                  }
+                  
+                  unique_authors <- unique(as.character(authors_list))
+                  
+                  last_names <- vapply(unique_authors, function(name) {
+                    name <- trimws(name)
+                    if (grepl(",", name)) {
+                      trimws(strsplit(name, ",")[[1]][1])
+                    } else {
+                      words <- strsplit(name, "\\\\s+")[[1]]
+                      words[length(words)]
+                    }
+                  }, character(1))
+                  
+                  n_authors <- length(last_names)
+                  
+                  if (n_authors == 1) {
+                    return(last_names[1])
+                  } else if (n_authors == 2) {
+                    return(paste(last_names[1], "and", last_names[2]))
+                  } else {
+                    return(paste0(last_names[1], " et al"))
+                  }
+                }
+            `);
+            
+            await webR.evalR(`
+                format_list_to_string <- function(list_field) {
+                  if (is.null(list_field) || length(list_field) == 0) {
+                    return(NA_character_)
+                  } else {
+                    return(paste(list_field, collapse = "; "))
+                  }
+                }
+            `);
+            
+            // Load main extraction function
+            await webR.evalR(`
+                extract_qdr_datasets <- function(server_url = "https://data.qdr.syr.edu", 
+                                                max_results = 1000,
+                                                start_date = NULL,
+                                                end_date = NULL) {
+                  
+                  cat("=== DEBUG INFO ===\\n")
+                  cat("Current timeout setting:", getOption("timeout"), "seconds\\n")
+                  cat("Server URL:", server_url, "\\n")
+                  cat("Max results:", max_results, "\\n")
+                  
+                  # Force timeout settings again
+                  options(timeout = 120)
+                  httr::set_config(httr::timeout(120))
+                  
+                  # Set environment variable
+                  Sys.setenv("DATAVERSE_SERVER" = server_url)
+                  cat("Environment DATAVERSE_SERVER set to:", Sys.getenv("DATAVERSE_SERVER"), "\\n")
+                  
+                  cat("Connecting to", server_url, "...\\n")
+                  
+                  if (!is.null(start_date)) {
+                    start_date <- as.Date(start_date)
+                    cat("Filtering datasets published on or after:", as.character(start_date), "\\n")
+                  }
+                  if (!is.null(end_date)) {
+                    end_date <- as.Date(end_date)
+                    cat("Filtering datasets published on or before:", as.character(end_date), "\\n")
+                  }
+                  
+                  # Test basic connectivity first
+                  cat("Testing basic URL accessibility...\\n")
+                  tryCatch({
+                    test_url <- paste0(server_url, "/api/info/version")
+                    cat("Trying to reach:", test_url, "\\n")
+                    response <- httr::GET(test_url, httr::timeout(30))
+                    cat("Basic connectivity test - Status:", httr::status_code(response), "\\n")
+                  }, error = function(e) {
+                    cat("Basic connectivity test failed:", e$message, "\\n")
+                  })
+                  
+                  # Search for datasets with enhanced debugging
+                  cat("Starting dataverse_search...\\n")
+                  cat("Search parameters: query='*', type='dataset', per_page=", max_results, "\\n")
+                  
+                  search_results <- tryCatch({
+                    cat("Attempt 1: Calling dataverse_search()...\\n")
+                    result <- dataverse_search(
+                      "*",
+                      type = "dataset", 
+                      per_page = max_results,
+                      start = 0
+                    )
+                    cat("Search completed successfully!\\n")
+                    result
+                  }, error = function(e) {
+                    cat("Search failed with error:", e$message, "\\n")
+                    cat("Error class:", class(e), "\\n")
+                    cat("Retrying in 3 seconds...\\n")
+                    Sys.sleep(3)
+                    
+                    cat("Attempt 2: Calling dataverse_search()...\\n")
+                    result2 <- dataverse_search(
+                      "*",
+                      type = "dataset",
+                      per_page = min(max_results, 100),  # Try smaller batch first
+                      start = 0
+                    )
+                    cat("Retry completed successfully!\\n") 
+                    result2
+                  })
+                  
+                  cat("Found", nrow(search_results), "total datasets\\n")
+                  
+                  # Process the data
+                  datasets_df <- search_results |>
+                    as_tibble() |>
+                    select(
+                      dataset_id = global_id,
+                      title = name,
+                      description,
+                      published_at,
+                      type,
+                      url,
+                      any_of(c("authors", "subjects", "keywords", "publications"))
+                    ) |>
+                    mutate(
+                      published_date = as.Date(published_at),
+                      dataset_url = paste0(server_url, "/dataset.xhtml?persistentId=", dataset_id),
+                      authors_formatted = map_chr(authors, format_authors),
+                      keywords = map_chr(keywords, format_list_to_string),
+                      subjects = map_chr(subjects, format_list_to_string)
+                    ) |>
+                    select(-authors) |>
+                    rename(authors = authors_formatted)
+                  
+                  # Apply date filtering
+                  if (!is.null(start_date) || !is.null(end_date)) {
+                    original_count <- nrow(datasets_df)
+                    
+                    if (!is.null(start_date)) {
+                      datasets_df <- datasets_df |> filter(published_date >= start_date)
+                    }
+                    
+                    if (!is.null(end_date)) {
+                      datasets_df <- datasets_df |> filter(published_date <= end_date)
+                    }
+                    
+                    filtered_count <- nrow(datasets_df)
+                    cat("After date filtering:", filtered_count, "datasets remain\\n")
+                  }
+                  
+                  datasets_df <- datasets_df |> arrange(desc(published_date))
+                  
+                  return(datasets_df)
+                }
+            `);
+            
+            // Test that functions are loaded
+            await webR.evalR(`
+                cat("Functions loaded successfully!\\n")
+                cat("Testing function availability:\\n")
+                cat("- format_authors:", exists("format_authors"), "\\n")
+                cat("- format_list_to_string:", exists("format_list_to_string"), "\\n") 
+                cat("- extract_qdr_datasets:", exists("extract_qdr_datasets"), "\\n")
+            `);
+        }
+
+        async function extractDatasets() {
+            const serverUrl = document.getElementById('server-url').value;
+            const startDate = document.getElementById('start-date').value || 'NULL';
+            const endDate = document.getElementById('end-date').value || 'NULL';
+            const maxResults = document.getElementById('max-results').value;
+
+            updateStatus('Extracting datasets...', 'running');
+            document.getElementById('extract-btn').disabled = true;
+            document.getElementById('download-section').classList.add('d-none');
+
+            try {
+                const rCommand = `
+                    result <- extract_qdr_datasets(
+                        server_url = "${serverUrl}",
+                        max_results = ${maxResults},
+                        start_date = ${startDate === 'NULL' ? 'NULL' : `"${startDate}"`},
+                        end_date = ${endDate === 'NULL' ? 'NULL' : `"${endDate}"`}
+                    )
+                    
+                    # Convert to CSV format
+                    csv_content <- paste(capture.output(write.csv(result, row.names = FALSE)), collapse = "\\n")
+                    
+                    # Summary stats
+                    list(
+                        csv = csv_content,
+                        count = nrow(result),
+                        date_range = if(nrow(result) > 0) paste(min(result$published_date, na.rm=TRUE), "to", max(result$published_date, na.rm=TRUE)) else "No datasets",
+                        top_authors = if(nrow(result) > 0) head(names(sort(table(result$authors), decreasing=TRUE)), 5) else character(0)
+                    )
+                `;
+
+                const result = await webR.evalR(rCommand);
+                const resultData = await result.toJs();
+
+                extractedData = resultData.csv;
+                
+                updateStatus('Extraction complete!', 'success');
+                
+                // Show download section
+                document.getElementById('download-section').classList.remove('d-none');
+                
+                // Update summary
+                const summaryHtml = `
+                    <strong>Extraction Summary:</strong><br>
+                    • Total datasets: ${resultData.count}<br>
+                    • Date range: ${resultData.date_range}<br>
+                    • Top authors: ${resultData.top_authors.join(', ')}<br>
+                `;
+                document.getElementById('summary-stats').innerHTML = summaryHtml;
+                
+                appendOutput(`\\nExtraction completed successfully!\\n`);
+                appendOutput(`${resultData.count} datasets extracted and ready for download.\\n`);
+
+            } catch (error) {
+                updateStatus('Error occurred', 'error');
+                appendOutput(`\\nError: ${error.message}\\n`);
+            } finally {
+                document.getElementById('extract-btn').disabled = false;
+            }
+        }
+
+        function downloadCSV() {
+            if (!extractedData) return;
+
+            const startDate = document.getElementById('start-date').value;
+            const endDate = document.getElementById('end-date').value;
+            
+            let filename = 'qdr_datasets';
+            if (startDate || endDate) {
+                if (startDate && endDate) {
+                    filename += `_${startDate.replace(/-/g, '')}_to_${endDate.replace(/-/g, '')}`;
+                } else if (startDate) {
+                    filename += `_from_${startDate.replace(/-/g, '')}`;
+                } else if (endDate) {
+                    filename += `_until_${endDate.replace(/-/g, '')}`;
+                }
+            }
+            filename += '.csv';
+
+            const blob = new Blob([extractedData], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function updateStatus(message, type) {
+            const badge = document.getElementById('status-badge');
+            badge.textContent = message;
+            badge.className = `badge bg-${type === 'running' ? 'warning' : type === 'success' ? 'success' : type === 'error' ? 'danger' : 'secondary'}`;
+            
+            if (type === 'running') {
+                badge.innerHTML = '<div class="loading-spinner"></div>' + message;
+            }
+        }
+
+        function appendOutput(text) {
+            const output = document.getElementById('console-output');
+            output.textContent += text;
+            output.scrollTop = output.scrollHeight;
+        }
+
+        // Event listeners
+        document.getElementById('extract-btn').addEventListener('click', extractDatasets);
+        document.getElementById('download-btn').addEventListener('click', downloadCSV);
+
+        // Initialize on page load
+        initWebR();
+    </script>
+</body>
+</html>
